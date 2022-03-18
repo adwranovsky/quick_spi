@@ -1,0 +1,29 @@
+[tasks]
+bmc
+prove
+cover
+
+[options]
+bmc:
+mode bmc
+depth 10
+
+prove:
+mode prove
+depth 10
+
+cover:
+mode cover
+depth 200
+--
+
+[engines]
+smtbmc
+
+[script]
+read -formal quick_spi.v
+chparam -set COVER 1 quick_spi
+prep -top quick_spi
+
+[files]
+{{files}}
