@@ -247,10 +247,75 @@ module quick_spi #(
 
 
 `ifdef FORMAL
+    genvar f;
+
     // Keep track of whether or not $past() is valid
     reg f_past_valid = 0;
     always @(posedge clk_i)
         f_past_valid <= 1;
+
+    // Assume that the downstream device is only going to change sdata_i on a falling clock edge
+    always @(posedge clk_i)
+        if (f_past_valid && $changed(sdata_i))
+            assume($fell(sclk_o));
+
+    // Keep track of whether or not a transaction is currently outstanding
+    reg f_transaction_outstanding = 0;
+    always @(posedge clk_i)
+        if (rst_i || data_valid_o)
+            f_transaction_outstanding <= 0;
+        else if (request_i)
+            f_transaction_outstanding <= 1;
+        else
+            f_transaction_outstanding <= f_transaction_outstanding;
+
+    // Remember how much data is requested
+    reg [NUM_DATA_WIDTH-1:0] f_num_data_requested = 0;
+    always @(posedge clk_i)
+        if (!f_transaction_outstanding && request_i)
+            f_num_data_requested <= num_data_i;
+
+    // Keep track of the last MAX_DATA_WIDTH+1 data bits clocked in for each device on sdata_i
+    // The extra +1 is added because sclk_o idles high and will have one "fake" rising edge when it returns to idle
+    reg [MAX_DATA_LENGTH*NUM_DEVICES:0] f_last_data_word;
+    generate for (f = 0; f < NUM_DEVICES; f = f+1) begin
+        always @(posedge clk_i)
+            if (f_past_valid && $rose(sclk_o))
+                // Shift in the value on sdata_i on the LSB of f_last_data_word
+                f_last_data_word[f*(MAX_DATA_LENGTH+1) +: MAX_DATA_LENGTH+1] <= {
+                    f_last_data_word[f*MAX_DATA_LENGTH +: MAX_DATA_LENGTH],
+                    sdata_i[f]
+                };
+    end endgenerate
+
+    // Make sure the state register is always valid
+    always @(*)
+        assert(
+            state == WAIT ||
+            state == CHIP_SELECT ||
+            state == TRANSFER_DATA ||
+            state == BE_QUIET ||
+            state == SAMPLE_STROBE ||
+            state == RESET
+        );
+
+    // Verify that the data put on sdata_i matches what's strobed on data_o
+    generate for (f = 0; f < NUM_DEVICES; f = f+1) begin
+        always @(posedge clk_i)
+            if (data_valid_o) begin
+                assert(
+                    (data_o[f*MAX_DATA_LENGTH +: MAX_DATA_LENGTH])
+                    ==
+                    (f_last_data_word[(f*(MAX_DATA_LENGTH+1))+1 +: MAX_DATA_LENGTH])
+                );
+            end
+    end endgenerate
+
+    // Assert that data_valid_o is only asserted if there is an outstanding transaction
+    always @(*)
+        if (data_valid_o)
+            assert(f_transaction_outstanding);
+
 
     // Cover properties
     generate if (COVER==1) begin
