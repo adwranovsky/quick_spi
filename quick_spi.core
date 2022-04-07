@@ -7,7 +7,7 @@ filesets:
         depend:
             - ">=adwranovsky_blips_timer-0.2"
             - ">=adwranovsky_blips_shift_register-1.0"
-            - ">=adwranovsky_blips_clkdiv-0.2"
+            - ">=adwranovsky_blips_clkdiv-1.0"
         files:
             - rtl/quick_spi.v
         file_type: systemVerilogSource

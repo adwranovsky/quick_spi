@@ -85,13 +85,14 @@ module quick_spi #(
     /*
      * Create a clock divider module for generating sclk_o
      */
-    reg enable_sclk;
+    reg enable_sclk, sclk_idle;
     clkdiv #(
         .DIV(CLK_DIV),
         .IDLE_HIGH(1)
     ) sclk_generator (
         .clk_i(clk_i),
         .enable_i(enable_sclk),
+        .idle_o(sclk_idle),
         .clk_o(sclk_o)
     );
 
@@ -113,7 +114,7 @@ module quick_spi #(
     always @(posedge clk_i)
         if (set_num_data)
             data_remaining <= num_data_i;
-        else if (sclk_falling_edge)
+        else if (sclk_rising_edge)
             data_remaining <= data_remaining - 1;
         else
             data_remaining <= data_remaining;
@@ -180,7 +181,7 @@ module quick_spi #(
         /* verilator lint_off CASEINCOMPLETE */
         case (state)
             RESET:
-                if (sclk_o)
+                if (sclk_idle)
                     next_state = WAIT;
             WAIT:
                 if (request_i)
@@ -254,6 +255,11 @@ module quick_spi #(
     always @(posedge clk_i)
         f_past_valid <= 1;
 
+    // Assume that the device starts in reset
+    always @(*)
+        if (!f_past_valid)
+            assume(rst_i);
+
     // Assume that the downstream device is only going to change sdata_i on a falling clock edge
     always @(posedge clk_i)
         if (f_past_valid && $changed(sdata_i))
@@ -262,18 +268,18 @@ module quick_spi #(
     // Keep track of whether or not a transaction is currently outstanding
     reg f_transaction_outstanding = 0;
     always @(posedge clk_i)
-        if (rst_i || data_valid_o)
+        if (rst_i || data_valid_o || state==RESET) // I'm cheating a bit here by checking `state`, but it makes this so much easier
             f_transaction_outstanding <= 0;
         else if (request_i)
             f_transaction_outstanding <= 1;
         else
             f_transaction_outstanding <= f_transaction_outstanding;
 
-    // Remember how much data is requested
-    reg [NUM_DATA_WIDTH-1:0] f_num_data_requested = 0;
+    // Remember how much data is requested and create a mask for those bits
+    reg [MAX_DATA_LENGTH-1:0] f_num_data_requested_mask = 0;
     always @(posedge clk_i)
         if (!f_transaction_outstanding && request_i)
-            f_num_data_requested <= num_data_i;
+            f_num_data_requested_mask <= {MAX_DATA_LENGTH{1'b1}} >> (MAX_DATA_LENGTH - num_data_i);
 
     // Keep track of the last MAX_DATA_WIDTH+1 data bits clocked in for each device on sdata_i
     // The extra +1 is added because sclk_o idles high and will have one "fake" rising edge when it returns to idle
@@ -304,9 +310,9 @@ module quick_spi #(
         always @(posedge clk_i)
             if (data_valid_o) begin
                 assert(
-                    (data_o[f*MAX_DATA_LENGTH +: MAX_DATA_LENGTH])
+                    (data_o[f*MAX_DATA_LENGTH +: MAX_DATA_LENGTH] & f_num_data_requested_mask)
                     ==
-                    (f_last_data_word[(f*(MAX_DATA_LENGTH+1))+1 +: MAX_DATA_LENGTH])
+                    (f_last_data_word[(f*(MAX_DATA_LENGTH+1))+1 +: MAX_DATA_LENGTH] & f_num_data_requested_mask)
                 );
             end
     end endgenerate
