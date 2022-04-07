@@ -268,7 +268,7 @@ module quick_spi #(
     // Keep track of whether or not a transaction is currently outstanding
     reg f_transaction_outstanding = 0;
     always @(posedge clk_i)
-        if (rst_i || data_valid_o || state==RESET) // I'm cheating a bit here by checking `state`, but it makes this so much easier
+        if (rst_i || (data_valid_o && !request_i) || state==RESET) // I'm cheating a bit here by checking `state`, but it makes this so much easier
             f_transaction_outstanding <= 0;
         else if (request_i)
             f_transaction_outstanding <= 1;
