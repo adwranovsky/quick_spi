@@ -322,6 +322,12 @@ module quick_spi #(
         if (data_valid_o)
             assert(f_transaction_outstanding);
 
+    // Following are properties which ensure that the internal state remains consistent during the inductive proof. Not
+    // needed for BMC.
+    always @(posedge clk_i) begin
+        if (sclk_rising_edge)
+            assert($rose(sclk_o));
+    end
 
     // Cover properties
     generate if (COVER==1) begin
