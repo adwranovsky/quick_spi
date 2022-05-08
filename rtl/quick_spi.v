@@ -343,10 +343,18 @@ module quick_spi #(
         if (data_valid_o)
             assert(f_transaction_outstanding);
 
-    // Cover properties
-    generate if (COVER==1) begin
+    // Cover properties to demonstrate how the device is used
+    generate if (COVER==1 && NUM_DEVICES==1 && MAX_DATA_LENGTH==5) begin
+        reg [MAX_DATA_LENGTH-1:0] f_last_data_requested = 0;
+        always @(posedge clk_i)
+            if (state==WAIT && request_i)
+                f_last_data_requested <= data_i;
+
         always @(*)
-            cover();
+            cover(
+                !rst_i && data_valid_o && f_num_data_requested_mask == 5'b11111
+                && data_o == 5'b10101 && f_last_data_requested == 5'b01010
+            );
     end endgenerate
 `endif
 
