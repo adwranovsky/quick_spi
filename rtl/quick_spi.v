@@ -5,18 +5,34 @@
  *
  * Parameters:
  *  CLK_FREQ_HZ - The input clock frequency
- *  SCLK_FREQ_HZ - The SPI clock frequency
- *  DATA_WIDTH - The number of data bits to read and write per transaction
+ *  SCLK_FREQ_HZ - The SPI clock frequency. The actual frequency will only match if `CLK_FREQ_HZ` / `SCLK_FREQ_HZ` is an integer.
+ *  MAX_DATA_LENGTH - The maximum number of data bits that can be read and written per transaction
+ *  NUM_DEVICES - The number of devices parallel to each other on the bus. Defaults to a single device.
  *  CS_TO_SCLK_TIME - The minimum allowed time in seconds from CS assertion to SCLK first going low
- *  HOLDOFF_TIME - The minimum amount of time from the last falling edge of SCLK to the next CS assertion
+ *  HOLDOFF_TIME - The minimum amount of time in seconds from the last rising edge of SCLK to the next CS assertion
  *  COVER - For testing use only. Set to 1 to include cover properties during formal verification
  *
  * Ports:
  *  clk_i - The system clock
- *  enable_i - When high, enables clk_o
- *  clk_o - The output clock, with a frequency that is the frequency of clk_i divided by DIV
+ *  rst_i - An active high reset synchronous with `clk_i`
+ *  request_i - A strobed signal indicating `num_data_i` and `data_i` are valid and that a new transaction should be
+ *              started. Ignored if there is currently an ongoing transaction.
+ *  num_data_i - The number of bits from `data_i` to send and to receive on `data_o`.
+ *  data_i - The data to write out serially on `sclk_o`. Only the first `num_data_i` bits are used.
+ *  data_valid_o - Strobes high when a transaction is complete, indicating that `data_o` is valid.
+ *  data_o - The data read serially in on `sdata_i`. Valid when `data_valid_o` is high, though only the first
+ *           `num_data_i` bits requested are actually valid.
+ *  sclk_o - The output clock for the SPI interface, with a frequency no greater than `SCLK_FREQ_HZ`.
+ *  cs_n_o - The chip select signal of the SPI interface
+ *  sdata_i - The SPI data input from the SPI device
+ *  sdata_o - The SPI data output to the SPI device
  *
  * Description:
+ *  The quickest way to integrate an external SPI device into a design. It has a simple request interface supporting
+ *  variable payload lengths, and handles some common requirements on the device side of the interface. Additionally it
+ *  can handle multiple devices connected to the same SPI clock and chip select in parallel. To start a transaction, put
+ *  the data you want to write on `data_i` along with the length on `num_data_i`, and strobe `request_i`. Then just wait
+ *  for `data_valid_o` to go high and read the data back on `data_i`. 
  */
 module quick_spi #(
     parameter CLK_FREQ_HZ = 100000000,
@@ -36,8 +52,8 @@ module quick_spi #(
     input  wire request_i,
     input  wire [NUM_DATA_WIDTH-1:0] num_data_i,
     input  wire [MAX_DATA_LENGTH*NUM_DEVICES-1:0] data_i,
-    output wire [MAX_DATA_LENGTH*NUM_DEVICES-1:0] data_o,
     output reg  data_valid_o,
+    output wire [MAX_DATA_LENGTH*NUM_DEVICES-1:0] data_o,
 
     // SPI interface
     output wire sclk_o,
@@ -48,9 +64,8 @@ module quick_spi #(
     genvar i;
 
     // Try to force an elaboration failure if invalid parameters were specified
-    generate if (SCLK_FREQ_HZ > CLK_FREQ_HZ)
-        // TODO: Is this check right? Is it not ... > CLK_FREQ_HZ*2?
-        invalid_verilog_parameter CLK_FREQ_HZ_must_be_larger_than_SCLK_FREQ_HZ ();
+    generate if (SCLK_FREQ_HZ*2 > CLK_FREQ_HZ)
+        invalid_verilog_parameter SCLK_FREQ_HZ_times_2_must_be_less_than_or_equal_to_CLK_FREQ_HZ ();
     endgenerate
     generate if (NUM_DEVICES <= 0)
         invalid_verilog_parameter NUM_DEVICES_must_be_a_positive_integer ();
@@ -59,7 +74,7 @@ module quick_spi #(
 
     // The number of system clocks per SPI clock
     localparam CLK_DIV = CLK_FREQ_HZ / SCLK_FREQ_HZ;
-    // The minimum number of system clocks from chip select assertion to the first sclk edge
+    // The minimum number of system clocks from chip select assertion to the first falling sclk edge
     localparam CS_TO_SCLK_CLOCKS = $rtoi($ceil(CLK_FREQ_HZ * CS_TO_SCLK_TIME));
     // The minimum number of system clocks to wait from the last rising sclk edge until a transaction can be started
     // again
@@ -220,7 +235,7 @@ module quick_spi #(
                 // all outputs are the default
             end
             WAIT: begin
-                start_timer = request_i; // TODO: finish this
+                start_timer = request_i;
                 set_num_data = request_i;
                 set_data_out = request_i;
             end
