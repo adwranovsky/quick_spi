@@ -47,9 +47,9 @@ module quick_spi #(
 );
     genvar i;
 
-    // TODO: Is this check real? Is it not ... > CLK_FREQ_HZ*2?
     // Try to force an elaboration failure if invalid parameters were specified
     generate if (SCLK_FREQ_HZ > CLK_FREQ_HZ)
+        // TODO: Is this check right? Is it not ... > CLK_FREQ_HZ*2?
         invalid_verilog_parameter CLK_FREQ_HZ_must_be_larger_than_SCLK_FREQ_HZ ();
     endgenerate
     generate if (NUM_DEVICES <= 0)
@@ -59,9 +59,10 @@ module quick_spi #(
 
     // The number of system clocks per SPI clock
     localparam CLK_DIV = CLK_FREQ_HZ / SCLK_FREQ_HZ;
-    // The minimum number of system clocks it takes to satisfy t2 from the datasheet
+    // The minimum number of system clocks from chip select assertion to the first sclk edge
     localparam CS_TO_SCLK_CLOCKS = $rtoi($ceil(CLK_FREQ_HZ * CS_TO_SCLK_TIME));
-    // The minimum number of system clocks it takes to satisfy t8+tquiet from the datasheet
+    // The minimum number of system clocks to wait from the last rising sclk edge until a transaction can be started
+    // again
     localparam HOLDOFF_CLOCKS = $rtoi($ceil(CLK_FREQ_HZ * HOLDOFF_TIME));
 
 
@@ -282,16 +283,21 @@ module quick_spi #(
             f_num_data_requested_mask <= {MAX_DATA_LENGTH{1'b1}} >> (MAX_DATA_LENGTH - num_data_i);
 
     // Keep track of the last MAX_DATA_WIDTH+1 data bits clocked in for each device on sdata_i
-    // The extra +1 is added because sclk_o idles high and will have one "fake" rising edge when it returns to idle
-    reg [MAX_DATA_LENGTH*NUM_DEVICES:0] f_last_data_word;
+    // The extra +1 is added to the max data length because sclk_o idles high and will clock in one extra bit when it
+    // returns to idle.
+    wire [MAX_DATA_LENGTH*NUM_DEVICES-1:0] f_last_data_word;
+    reg [(MAX_DATA_LENGTH+1)*NUM_DEVICES-1:0] f_last_data_word_plus_idle_return;
     generate for (f = 0; f < NUM_DEVICES; f = f+1) begin
         always @(posedge clk_i)
             if (f_past_valid && $rose(sclk_o))
                 // Shift in the value on sdata_i on the LSB of f_last_data_word
-                f_last_data_word[f*(MAX_DATA_LENGTH+1) +: MAX_DATA_LENGTH+1] <= {
-                    f_last_data_word[f*MAX_DATA_LENGTH +: MAX_DATA_LENGTH],
+                f_last_data_word_plus_idle_return[f*(MAX_DATA_LENGTH+1) +: MAX_DATA_LENGTH+1] <= {
+                    f_last_data_word_plus_idle_return[f*MAX_DATA_LENGTH +: MAX_DATA_LENGTH],
                     sdata_i[f]
                 };
+
+        assign f_last_data_word[f*MAX_DATA_LENGTH +: MAX_DATA_LENGTH] =
+            f_last_data_word_plus_idle_return[f*(MAX_DATA_LENGTH+1)+1 +: MAX_DATA_LENGTH];
     end endgenerate
 
     // Make sure the state register is always valid
@@ -312,7 +318,7 @@ module quick_spi #(
                 assert(
                     (data_o[f*MAX_DATA_LENGTH +: MAX_DATA_LENGTH] & f_num_data_requested_mask)
                     ==
-                    (f_last_data_word[(f*(MAX_DATA_LENGTH+1))+1 +: MAX_DATA_LENGTH] & f_num_data_requested_mask)
+                    (f_last_data_word[f*MAX_DATA_LENGTH +: MAX_DATA_LENGTH] & f_num_data_requested_mask)
                 );
             end
     end endgenerate
@@ -321,13 +327,6 @@ module quick_spi #(
     always @(*)
         if (data_valid_o)
             assert(f_transaction_outstanding);
-
-    // Following are properties which ensure that the internal state remains consistent during the inductive proof. Not
-    // needed for BMC.
-    always @(posedge clk_i) begin
-        if (sclk_rising_edge)
-            assert($rose(sclk_o));
-    end
 
     // Cover properties
     generate if (COVER==1) begin
