@@ -5,11 +5,13 @@
  *
  * Parameters:
  *  CLK_FREQ_HZ - The input clock frequency
- *  SCLK_FREQ_HZ - The SPI clock frequency. The actual frequency will only match if `CLK_FREQ_HZ` / `SCLK_FREQ_HZ` is an integer.
+ *  SCLK_FREQ_HZ - The SPI clock frequency. The actual frequency will only match if `CLK_FREQ_HZ` / `SCLK_FREQ_HZ` is an
+ *                 integer. Additionally, the frequency must be no greater than 1/4 the system clock.
  *  MAX_DATA_LENGTH - The maximum number of data bits that can be read and written per transaction
  *  NUM_DEVICES - The number of devices parallel to each other on the bus. Defaults to a single device.
  *  CS_TO_SCLK_TIME - The minimum allowed time in seconds from CS assertion to SCLK first going low
- *  HOLDOFF_TIME - The minimum amount of time in seconds from the last rising edge of SCLK to the next CS assertion
+ *  SDATA_HOLD_TIME - The minimum amount of time to hold `sdata_o` steady after the rising edge of `sclk_o`
+ *  QUIET_TIME - The minimum amount of time in seconds from the last rising edge of SCLK to the next CS assertion
  *  COVER - For testing use only. Set to 1 to include cover properties during formal verification
  *
  * Ports:
@@ -39,8 +41,9 @@ module quick_spi #(
     parameter SCLK_FREQ_HZ = 20000000,
     parameter MAX_DATA_LENGTH = 16,
     parameter NUM_DEVICES = 1,
-    parameter CS_TO_SCLK_TIME = 10e-9,
-    parameter HOLDOFF_TIME = 90e-9,
+    parameter CS_TO_SCLK_TIME = 1.0 / SCLK_FREQ_HZ / 4.0,
+    parameter SDATA_HOLD_TIME = 1.0 / SCLK_FREQ_HZ / 4.0,
+    parameter QUIET_TIME = 1.0 / SCLK_FREQ_HZ * 2.0,
     parameter COVER = 0,
 
     localparam NUM_DATA_WIDTH = $clog2(MAX_DATA_LENGTH)
@@ -64,8 +67,8 @@ module quick_spi #(
     genvar i;
 
     // Try to force an elaboration failure if invalid parameters were specified
-    generate if (SCLK_FREQ_HZ*2 > CLK_FREQ_HZ)
-        invalid_verilog_parameter SCLK_FREQ_HZ_times_2_must_be_less_than_or_equal_to_CLK_FREQ_HZ ();
+    generate if (SCLK_FREQ_HZ*4 > CLK_FREQ_HZ)
+        invalid_verilog_parameter SCLK_FREQ_HZ_times_4_must_be_less_than_or_equal_to_CLK_FREQ_HZ ();
     endgenerate
     generate if (NUM_DEVICES <= 0)
         invalid_verilog_parameter NUM_DEVICES_must_be_a_positive_integer ();
@@ -76,15 +79,18 @@ module quick_spi #(
     localparam CLK_DIV = CLK_FREQ_HZ / SCLK_FREQ_HZ;
     // The minimum number of system clocks from chip select assertion to the first falling sclk edge
     localparam CS_TO_SCLK_CLOCKS = $rtoi($ceil(CLK_FREQ_HZ * CS_TO_SCLK_TIME));
+    // The minimum number of system clocks to hold sdata_o steady after a rising sclk edge. Subtract one since edge
+    // detection is delayed by one clock cycle
+    localparam SDATA_HOLD_CLOCKS = $rtoi($ceil(CLK_FREQ_HZ * SDATA_HOLD_TIME)) - 1;
     // The minimum number of system clocks to wait from the last rising sclk edge until a transaction can be started
     // again
-    localparam HOLDOFF_CLOCKS = $rtoi($ceil(CLK_FREQ_HZ * HOLDOFF_TIME));
+    localparam QUIET_CLOCKS = $rtoi($ceil(CLK_FREQ_HZ * QUIET_TIME));
 
 
     /*
      * Create a timer for handling SPI timings
      */
-    localparam TIMER_WIDTH = $clog2(HOLDOFF_CLOCKS);
+    localparam TIMER_WIDTH = $clog2(QUIET_CLOCKS);
     reg start_timer;
     reg timer_done;
     reg [TIMER_WIDTH-1:0] timer_count;
@@ -119,7 +125,27 @@ module quick_spi #(
     always @(posedge clk_i)
         last_sclk <= sclk_o;
     wire sclk_rising_edge  = sclk_o && !last_sclk;
-    wire sclk_falling_edge = !sclk_o && last_sclk;
+
+    /*
+     * Handle sdata hold time using a shift register that delays sclk_rising_edge
+     */
+    wire shift_data_out;
+    generate
+        if (SDATA_HOLD_CLOCKS == 0) begin
+            assign shift_data_out = sclk_rising_edge;
+        end else begin
+            reg [SDATA_HOLD_CLOCKS-1:0] shift_delay = 0;
+            always @(posedge clk_i) begin
+                if (rst_i) begin
+                    shift_delay <= 0;
+                end else begin
+                    shift_delay    <= shift_delay << 1;
+                    shift_delay[0] <= sclk_rising_edge;
+                end
+            end
+            assign shift_data_out = shift_delay[SDATA_HOLD_CLOCKS-1];
+        end
+    endgenerate
 
     /*
      * Count the amount of data transferred
@@ -166,7 +192,7 @@ module quick_spi #(
             .rst_i(rst_i),
             .set_i(set_data_out),
             .value_i(data_i[MAX_DATA_LENGTH*i +: MAX_DATA_LENGTH]),
-            .advance_i(sclk_falling_edge),
+            .advance_i(shift_data_out),
             .bit_o(sdata_o[i])
         );
     end endgenerate
@@ -244,7 +270,7 @@ module quick_spi #(
                 enable_sclk = timer_done;
             end
             TRANSFER_DATA: begin
-                timer_count = HOLDOFF_CLOCKS[TIMER_WIDTH-1:0];
+                timer_count = QUIET_CLOCKS[TIMER_WIDTH-1:0];
                 start_timer = completed_transfer;
                 cs_n_o = 0;
                 enable_sclk = 1;
