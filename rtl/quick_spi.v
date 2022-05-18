@@ -76,6 +76,11 @@ module quick_spi #(
     input  wire [NUM_DEVICES-1:0] sdata_i,
     output wire [NUM_DEVICES-1:0] sdata_o
 );
+    // A function for indexing into the device data when there are multiple devices
+    function [MAX_DATA_LENGTH-1:0] device_data (input [MAX_DATA_LENGTH*NUM_DEVICES-1:0] data, input integer dev);
+        device_data = data[dev*MAX_DATA_LENGTH +: MAX_DATA_LENGTH];
+    endfunction
+
     genvar i;
 
     // Try to force an elaboration failure if invalid parameters were specified
@@ -210,7 +215,17 @@ module quick_spi #(
     end endgenerate
 
     /*
-     * SPI master state machine
+     * Create the read data mask on write handshakes
+     */
+    initial rddata_mask_o = 0;
+    always @(posedge clk_i)
+        if (wrdata_valid_i && wrdata_ready_o)
+            rddata_mask_o <= {MAX_DATA_LENGTH{1'b1}} >> (MAX_DATA_LENGTH - wrdata_len_i);
+        else
+            rddata_mask_o <= rddata_mask_o;
+
+    /*
+     * SPI state machine
      */
     localparam
         WRDATA_READY  = 3'h0,
@@ -316,67 +331,58 @@ module quick_spi #(
         if (f_past_valid && $changed(sdata_i))
             assume($fell(sclk_o));
 
-    // Keep track of whether or not a transaction is currently outstanding
-    reg f_transaction_outstanding = 0;
-    always @(posedge clk_i)
-        if (rst_i || (rddata_valid_o && !wrdata_valid_i) || state==RESET) // I'm cheating a bit here by checking `state`, but it makes this so much easier
-            f_transaction_outstanding <= 0;
-        else if (wrdata_valid_i)
-            f_transaction_outstanding <= 1;
-        else
-            f_transaction_outstanding <= f_transaction_outstanding;
-
-    // Remember how much data is requested and create a mask for those bits
-    reg [MAX_DATA_LENGTH-1:0] f_num_data_requested_mask = 0;
-    always @(posedge clk_i)
-        if (!f_transaction_outstanding && wrdata_valid_i)
-            f_num_data_requested_mask <= {MAX_DATA_LENGTH{1'b1}} >> (MAX_DATA_LENGTH - wrdata_len_i);
-
-    // Keep track of the last MAX_DATA_WIDTH+1 data bits clocked in for each device on sdata_i
-    // The extra +1 is added to the max data length because sclk_o idles high and will clock in one extra bit when it
-    // returns to idle.
-    wire [MAX_DATA_LENGTH*NUM_DEVICES-1:0] f_last_data_word;
-    reg [(MAX_DATA_LENGTH+1)*NUM_DEVICES-1:0] f_last_data_word_plus_idle_return;
-    generate for (f = 0; f < NUM_DEVICES; f = f+1) begin
-        always @(posedge clk_i)
-            if (f_past_valid && $rose(sclk_o))
-                // Shift in the value on sdata_i on the LSB of f_last_data_word
-                f_last_data_word_plus_idle_return[f*(MAX_DATA_LENGTH+1) +: MAX_DATA_LENGTH+1] <= {
-                    f_last_data_word_plus_idle_return[f*MAX_DATA_LENGTH +: MAX_DATA_LENGTH],
-                    sdata_i[f]
-                };
-
-        assign f_last_data_word[f*MAX_DATA_LENGTH +: MAX_DATA_LENGTH] =
-            f_last_data_word_plus_idle_return[f*(MAX_DATA_LENGTH+1)+1 +: MAX_DATA_LENGTH];
-    end endgenerate
-
     // Make sure the state register is always valid
     always @(*)
         assert(
             state == WRDATA_READY ||
             state == CHIP_SELECT ||
             state == TRANSFER_DATA ||
+            state == RDDATA_VALID ||
             state == BE_QUIET ||
-            state == SAMPLE_STROBE ||
             state == RESET
         );
 
-    // Verify that the data put on sdata_i matches what's strobed on rddata_o
-    generate for (f = 0; f < NUM_DEVICES; f = f+1) begin
-        always @(posedge clk_i)
-            if (rddata_valid_o) begin
-                assert(
-                    (rddata_o[f*MAX_DATA_LENGTH +: MAX_DATA_LENGTH] & f_num_data_requested_mask)
-                    ==
-                    (f_last_data_word[f*MAX_DATA_LENGTH +: MAX_DATA_LENGTH] & f_num_data_requested_mask)
-                );
+    // Identify when handshakes happen
+    wire f_write_handshake = wrdata_valid_i && wrdata_ready_o && !rst_i;
+    wire f_read_handshake  = rddata_valid_i && rddata_ready_o && !rst_i;
+
+    // Count the number of outstanding read transactions
+    integer f_outstanding_read_handshakes = 0;
+    always @(posedge clk_i)
+        if (rst_i)
+            f_outstanding_read_handshakes <= 0;
+        else if (f_write_handshake)
+            f_outstanding_read_handshakes <= f_outstanding_read_handshakes + 1;
+        else if (f_read_handshake)
+            f_outstanding_read_handshakes <= f_outstanding_read_handshakes - 1;
+
+    // Make sure there's never more than one outstanding read handshake
+    always @(*)
+        assert( (f_outstanding_read_handshakes == 0) || (f_outstanding_read_handshakes == 1) );
+
+    // Make sure the data presented on the read handshakes matches what came in on the SPI interface
+    reg [MAX_DATA_LENGTH*NUM_DEVICES-1:0] f_spi_read_data = 0;
+    generate for (f = 0; f < NUM_DEVICES; f = f + 1) begin
+        // Shift in read data
+        always @(posedge clk_i) begin
+            if ($rose(sclk_o) && !cs_n_o) begin
+                f_spi_read_data[f*MAX_DATA_LENGTH +: MAX_DATA_LENGTH] <= f_spi_read_data[f*MAX_DATA_LENGTH +: MAX_DATA_LENGTH] << 1;
+                f_spi_read_data[f*MAX_DATA_LENGTH] <= sdata_i;
             end
+        end
+
+        // Check read handshakes
+        always @(posedge clk_i)
+            if (f_read_handshake)
+                assert(
+                    (rddata_mask_o & device_data(rddata_o, f))
+                    ==
+                    (rddata_mask_o & device_data(f_spi_read_data, f))
+                );
     end endgenerate
 
-    // Assert that rddata_valid_o is only asserted if there is an outstanding transaction
-    always @(*)
-        if (rddata_valid_o)
-            assert(f_transaction_outstanding);
+    // Check each data bit clocked out on sdata_o against the last write handshake
+    // TODO
 
     // Cover properties to demonstrate how the device is used
     generate if (COVER==1 && NUM_DEVICES==1 && MAX_DATA_LENGTH==5) begin
