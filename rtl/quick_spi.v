@@ -17,13 +17,22 @@
  * Ports:
  *  clk_i - The system clock
  *  rst_i - An active high reset synchronous with `clk_i`
- *  request_i - A strobed signal indicating `num_data_i` and `data_i` are valid and that a new transaction should be
- *              started. Ignored if there is currently an ongoing transaction.
- *  num_data_i - The number of bits from `data_i` to send and to receive on `data_o`.
- *  data_i - The data to write out serially on `sclk_o`. Only the first `num_data_i` bits are used.
- *  data_valid_o - Strobes high when a transaction is complete, indicating that `data_o` is valid.
- *  data_o - The data read serially in on `sdata_i`. Valid when `data_valid_o` is high, though only the first
- *           `num_data_i` bits requested are actually valid.
+ *
+ *  wrdata_valid_i - Indicates that `wrdata_i` and `wrdata_len_i` are valid. A SPI transaction is only started when both
+ *                   `wrdata_valid_i` and `wrdata_ready_o` are high on the same clock cycle.
+ *  wrdata_ready_o - Indicates that the module is ready to accept write data for a new transaction. A SPI transaction is
+ *                   only started when both `wrdata_valid_i` and `wrdata_ready_o` are high on the same clock cycle.
+ *  wrdata_len_i - The number of bits from `wrdata_i` to send on `sdata_o` and to receive on `sdata_i`.
+ *  wrdata_i - The data to write out serially on `sclk_o`. Only the first `wrdata_len_i` bits are used.
+ *
+ *  rddata_valid_o - Indicates that `rddata_o` and `rddata_mask_o` are valid. The SPI transaction is only completed once
+ *                   `rddata_valid_o` and `rddata_read_i` are high on the same clock cycle.
+ *  rddata_ready_i - Indicates that the upstream device is ready to accept data. The SPI transaction is only completed
+ *                   once `rddata_ready_i` and `rddata_valid_o` are high on the same clock cycle.
+ *  rddata_mask_o - Indicates which bits of `rddata_o` are valid. The number of high bits
+ *                  matches the data length requested on `wrdata_len_i`.
+ *  rddata_o - The data read serially in on `sdata_i`. Valid when `rddata_valid_o` is high, though only the first
+ *             `wrdata_len_i` bits requested are actually valid.
  *  sclk_o - The output clock for the SPI interface, with a frequency no greater than `SCLK_FREQ_HZ`.
  *  cs_n_o - The chip select signal of the SPI interface
  *  sdata_i - The SPI data input from the SPI device
@@ -33,8 +42,8 @@
  *  The quickest way to integrate an external SPI device into a design. It has a simple request interface supporting
  *  variable payload lengths, and handles some common requirements on the device side of the interface. Additionally it
  *  can handle multiple devices connected to the same SPI clock and chip select in parallel. To start a transaction, put
- *  the data you want to write on `data_i` along with the length on `num_data_i`, and strobe `request_i`. Then just wait
- *  for `data_valid_o` to go high and read the data back on `data_i`. 
+ *  the data you want to write on `wrdata_i` along with the length on `wrdata_len_i`, and strobe `wrdata_valid_i`. Then just wait
+ *  for `rddata_valid_o` to go high and read the data back on `wrdata_i`. 
  */
 module quick_spi #(
     parameter CLK_FREQ_HZ = 100000000,
@@ -52,11 +61,14 @@ module quick_spi #(
     input wire rst_i,
 
     // FPGA interface
-    input  wire request_i,
-    input  wire [NUM_DATA_WIDTH-1:0] num_data_i,
-    input  wire [MAX_DATA_LENGTH*NUM_DEVICES-1:0] data_i,
-    output reg  data_valid_o,
-    output wire [MAX_DATA_LENGTH*NUM_DEVICES-1:0] data_o,
+    input  wire wrdata_valid_i,
+    output reg  wrdata_ready_o,
+    input  wire [NUM_DATA_WIDTH-1:0] wrdata_len_i,
+    input  wire [MAX_DATA_LENGTH*NUM_DEVICES-1:0] wrdata_i,
+    output reg  rddata_valid_o,
+    input  wire rddata_ready_i,
+    output reg  [MAX_DATA_LENGTH-1:0] rddata_mask_o,
+    output wire [MAX_DATA_LENGTH*NUM_DEVICES-1:0] rddata_o,
 
     // SPI interface
     output wire sclk_o,
@@ -155,7 +167,7 @@ module quick_spi #(
     wire completed_transfer = data_remaining == 0;
     always @(posedge clk_i)
         if (set_num_data)
-            data_remaining <= num_data_i;
+            data_remaining <= wrdata_len_i;
         else if (sclk_rising_edge)
             data_remaining <= data_remaining - 1;
         else
@@ -177,11 +189,11 @@ module quick_spi #(
             .bit_i(sdata_i[i]),
             .value_o(spi_parallel_out)
         );
-        assign data_o[MAX_DATA_LENGTH*i +: MAX_DATA_LENGTH] = spi_parallel_out[1 +: MAX_DATA_LENGTH];
+        assign rddata_o[MAX_DATA_LENGTH*i +: MAX_DATA_LENGTH] = spi_parallel_out[1 +: MAX_DATA_LENGTH];
     end endgenerate
 
     /*
-     * Create a parallel-in serial-out shift register from data_i to sdata_o for each device
+     * Create a parallel-in serial-out shift register from wrdata_i to sdata_o for each device
      */
     reg set_data_out;
     generate for (i = 0; i < NUM_DEVICES; i = i+1) begin
@@ -191,7 +203,7 @@ module quick_spi #(
             .clk_i(clk_i),
             .rst_i(rst_i),
             .set_i(set_data_out),
-            .value_i(data_i[MAX_DATA_LENGTH*i +: MAX_DATA_LENGTH]),
+            .value_i(wrdata_i[MAX_DATA_LENGTH*i +: MAX_DATA_LENGTH]),
             .advance_i(shift_data_out),
             .bit_o(sdata_o[i])
         );
@@ -201,7 +213,7 @@ module quick_spi #(
      * SPI master state machine
      */
     localparam
-        WAIT          = 3'h0,
+        WRDATA_READY  = 3'h0,
         CHIP_SELECT   = 3'h1,
         TRANSFER_DATA = 3'h2,
         BE_QUIET      = 3'h3,
@@ -224,9 +236,9 @@ module quick_spi #(
         case (state)
             RESET:
                 if (sclk_idle)
-                    next_state = WAIT;
-            WAIT:
-                if (request_i)
+                    next_state = WRDATA_READY;
+            WRDATA_READY:
+                if (wrdata_valid_i)
                     next_state = CHIP_SELECT;
             CHIP_SELECT:
                 if (timer_done)
@@ -238,10 +250,10 @@ module quick_spi #(
                 if (timer_done)
                     next_state = SAMPLE_STROBE;
             SAMPLE_STROBE:
-                if (request_i)
+                if (wrdata_valid_i)
                     next_state = CHIP_SELECT;
                 else
-                    next_state = WAIT;
+                    next_state = WRDATA_READY;
         endcase
         /* verilator lint_on CASEINCOMPLETE */
     end
@@ -249,7 +261,8 @@ module quick_spi #(
     // State outputs
     always @(*) begin
         cs_n_o = 1;
-        data_valid_o = 0;
+        rddata_valid_o = 0;
+        wrdata_ready_o = 0;
         enable_sclk = 0;
         start_timer = 0;
         timer_count = CS_TO_SCLK_CLOCKS[TIMER_WIDTH-1:0];
@@ -260,10 +273,11 @@ module quick_spi #(
             RESET: begin
                 // all outputs are the default
             end
-            WAIT: begin
-                start_timer = request_i;
-                set_num_data = request_i;
-                set_data_out = request_i;
+            WRDATA_READY: begin
+                wrdata_ready_o = 1;
+                start_timer = wrdata_valid_i;
+                set_num_data = wrdata_valid_i;
+                set_data_out = wrdata_valid_i;
             end
             CHIP_SELECT: begin
                 cs_n_o = 0;
@@ -279,10 +293,7 @@ module quick_spi #(
                 // all outputs are the default
             end
             SAMPLE_STROBE: begin
-                data_valid_o = 1;
-                start_timer = request_i;
-                set_num_data = request_i;
-                set_data_out = request_i;
+                rddata_valid_o = 1;
             end
         endcase
         /* verilator lint_on CASEINCOMPLETE */
@@ -310,9 +321,9 @@ module quick_spi #(
     // Keep track of whether or not a transaction is currently outstanding
     reg f_transaction_outstanding = 0;
     always @(posedge clk_i)
-        if (rst_i || (data_valid_o && !request_i) || state==RESET) // I'm cheating a bit here by checking `state`, but it makes this so much easier
+        if (rst_i || (rddata_valid_o && !wrdata_valid_i) || state==RESET) // I'm cheating a bit here by checking `state`, but it makes this so much easier
             f_transaction_outstanding <= 0;
-        else if (request_i)
+        else if (wrdata_valid_i)
             f_transaction_outstanding <= 1;
         else
             f_transaction_outstanding <= f_transaction_outstanding;
@@ -320,8 +331,8 @@ module quick_spi #(
     // Remember how much data is requested and create a mask for those bits
     reg [MAX_DATA_LENGTH-1:0] f_num_data_requested_mask = 0;
     always @(posedge clk_i)
-        if (!f_transaction_outstanding && request_i)
-            f_num_data_requested_mask <= {MAX_DATA_LENGTH{1'b1}} >> (MAX_DATA_LENGTH - num_data_i);
+        if (!f_transaction_outstanding && wrdata_valid_i)
+            f_num_data_requested_mask <= {MAX_DATA_LENGTH{1'b1}} >> (MAX_DATA_LENGTH - wrdata_len_i);
 
     // Keep track of the last MAX_DATA_WIDTH+1 data bits clocked in for each device on sdata_i
     // The extra +1 is added to the max data length because sclk_o idles high and will clock in one extra bit when it
@@ -344,7 +355,7 @@ module quick_spi #(
     // Make sure the state register is always valid
     always @(*)
         assert(
-            state == WAIT ||
+            state == WRDATA_READY ||
             state == CHIP_SELECT ||
             state == TRANSFER_DATA ||
             state == BE_QUIET ||
@@ -352,34 +363,34 @@ module quick_spi #(
             state == RESET
         );
 
-    // Verify that the data put on sdata_i matches what's strobed on data_o
+    // Verify that the data put on sdata_i matches what's strobed on rddata_o
     generate for (f = 0; f < NUM_DEVICES; f = f+1) begin
         always @(posedge clk_i)
-            if (data_valid_o) begin
+            if (rddata_valid_o) begin
                 assert(
-                    (data_o[f*MAX_DATA_LENGTH +: MAX_DATA_LENGTH] & f_num_data_requested_mask)
+                    (rddata_o[f*MAX_DATA_LENGTH +: MAX_DATA_LENGTH] & f_num_data_requested_mask)
                     ==
                     (f_last_data_word[f*MAX_DATA_LENGTH +: MAX_DATA_LENGTH] & f_num_data_requested_mask)
                 );
             end
     end endgenerate
 
-    // Assert that data_valid_o is only asserted if there is an outstanding transaction
+    // Assert that rddata_valid_o is only asserted if there is an outstanding transaction
     always @(*)
-        if (data_valid_o)
+        if (rddata_valid_o)
             assert(f_transaction_outstanding);
 
     // Cover properties to demonstrate how the device is used
     generate if (COVER==1 && NUM_DEVICES==1 && MAX_DATA_LENGTH==5) begin
         reg [MAX_DATA_LENGTH-1:0] f_last_data_requested = 0;
         always @(posedge clk_i)
-            if (state==WAIT && request_i)
-                f_last_data_requested <= data_i;
+            if (state==WRDATA_READY && wrdata_valid_i)
+                f_last_data_requested <= wrdata_i;
 
         always @(*)
             cover(
-                !rst_i && data_valid_o && f_num_data_requested_mask == 5'b11111
-                && data_o == 5'b10101 && f_last_data_requested == 5'b01010
+                !rst_i && rddata_valid_o && f_num_data_requested_mask == 5'b11111
+                && rddata_o == 5'b10101 && f_last_data_requested == 5'b01010
             );
     end endgenerate
 `endif
