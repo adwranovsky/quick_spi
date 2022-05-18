@@ -216,8 +216,8 @@ module quick_spi #(
         WRDATA_READY  = 3'h0,
         CHIP_SELECT   = 3'h1,
         TRANSFER_DATA = 3'h2,
-        BE_QUIET      = 3'h3,
-        SAMPLE_STROBE = 3'h4,
+        RDDATA_VALID  = 3'h3,
+        BE_QUIET      = 3'h4,
         RESET         = 3'h5;
     reg [2:0] state, next_state;
 
@@ -245,14 +245,12 @@ module quick_spi #(
                     next_state = TRANSFER_DATA;
             TRANSFER_DATA:
                 if (completed_transfer)
+                    next_state = RDDATA_VALID;
+            RDDATA_VALID:
+                if (rddata_ready_i)
                     next_state = BE_QUIET;
             BE_QUIET:
                 if (timer_done)
-                    next_state = SAMPLE_STROBE;
-            SAMPLE_STROBE:
-                if (wrdata_valid_i)
-                    next_state = CHIP_SELECT;
-                else
                     next_state = WRDATA_READY;
         endcase
         /* verilator lint_on CASEINCOMPLETE */
@@ -289,11 +287,11 @@ module quick_spi #(
                 cs_n_o = 0;
                 enable_sclk = 1;
             end
+            RDDATA_VALID: begin
+                rddata_valid_o = 1;
+            end
             BE_QUIET: begin
                 // all outputs are the default
-            end
-            SAMPLE_STROBE: begin
-                rddata_valid_o = 1;
             end
         endcase
         /* verilator lint_on CASEINCOMPLETE */
