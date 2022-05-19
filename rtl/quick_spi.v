@@ -182,19 +182,18 @@ module quick_spi #(
      * Create a serial-in parallel-out shift register for each device for reading in SPI data and converting it to
      * parallel
      */
-    localparam SIPO_SHIFT_REGISTER_WIDTH = MAX_DATA_LENGTH + 1; // add one to account for sclk_o's return to idle
     generate for (i = 0; i < NUM_DEVICES; i = i+1) begin
-        wire [SIPO_SHIFT_REGISTER_WIDTH-1:0] spi_parallel_out;
+        wire [MAX_DATA_LENGTH-1:0] spi_parallel_out;
         shift_register_sipo #(
-            .WIDTH(SIPO_SHIFT_REGISTER_WIDTH)
+            .WIDTH(MAX_DATA_LENGTH)
         ) spi_serial_in_parallel_out (
             .clk_i(clk_i),
             .rst_i(rst_i),
-            .advance_i(sclk_rising_edge),
+            .advance_i(sclk_rising_edge && !cs_n_o), // only shift when chip select is asserted
             .bit_i(sdata_i[i]),
             .value_o(spi_parallel_out)
         );
-        assign rddata_o[MAX_DATA_LENGTH*i +: MAX_DATA_LENGTH] = spi_parallel_out[1 +: MAX_DATA_LENGTH];
+        assign rddata_o[MAX_DATA_LENGTH*i +: MAX_DATA_LENGTH] = spi_parallel_out;
     end endgenerate
 
     /*
@@ -344,7 +343,7 @@ module quick_spi #(
 
     // Identify when handshakes happen
     wire f_write_handshake = wrdata_valid_i && wrdata_ready_o && !rst_i;
-    wire f_read_handshake  = rddata_valid_i && rddata_ready_o && !rst_i;
+    wire f_read_handshake  = rddata_valid_o && rddata_ready_i && !rst_i;
 
     // Count the number of outstanding read transactions
     integer f_outstanding_read_handshakes = 0;
