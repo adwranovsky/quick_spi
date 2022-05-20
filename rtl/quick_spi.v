@@ -381,7 +381,17 @@ module quick_spi #(
     end endgenerate
 
     // Check each data bit clocked out on sdata_o against the last write handshake
-    // TODO
+    reg [MAX_DATA_LENGTH*NUM_DEVICES-1:0] f_last_wrdata = 0;
+    integer f_num_sclks = 0;
+    always @(posedge clk_i) begin
+        if (f_write_handshake) begin
+            f_last_wrdata <= wrdata_i;
+            f_num_sclks <= 0;
+        end else if ($rose(sclk_o) && !cs_n_o && !rst_i) begin
+            assert(sdata_o == ((f_last_wrdata>>f_num_sclks) & 1'b1));
+            f_num_sclks <= f_num_sclks + 1;
+        end
+    end
 
     // Cover properties to demonstrate how the device is used
     generate if (COVER==1 && NUM_DEVICES==1 && MAX_DATA_LENGTH==5) begin
