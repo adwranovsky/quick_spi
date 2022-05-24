@@ -415,16 +415,29 @@ module quick_spi #(
 
     // Cover properties to demonstrate how the device is used
     generate if (COVER==1 && NUM_DEVICES==1 && MAX_DATA_LENGTH==5) begin
-        reg [MAX_DATA_LENGTH-1:0] f_last_data_requested = 0;
-        always @(posedge clk_i)
-            if (state==WRDATA_READY && wrdata_valid_i)
-                f_last_data_requested <= wrdata_i;
+        reg f_reached_first_cover_condition = 0;
+        always @(posedge clk_i) begin
+            // don't needlessly toggle wrdata_valid_i and rddata_ready_i
+            if ($fell(wrdata_valid_i))
+                assume($past(wrdata_ready_o));
+            if ($fell(rddata_ready_i))
+                assume($past(rddata_valid_o));
 
-        always @(*)
-            cover(
-                !rst_i && rddata_valid_o && f_num_data_requested_mask == 5'b11111
-                && rddata_o == 5'b10101 && f_last_data_requested == 5'b01010
+            // stop spurious resets
+            if (f_past_valid)
+                assume(!rst_i);
+
+            // decide what SPI data we want to read/write for the demonstration
+            f_reached_first_cover_condition <= f_reached_first_cover_condition || (
+                !rst_i && rddata_ready_i && rddata_valid_o
+                && rddata_mask_o == 5'b11111 && rddata_o == 5'b10101
+                && f_last_wrdata == 5'b01010
             );
+
+            // show the device going back into the ready state
+            if (f_reached_first_cover_condition)
+                cover(wrdata_ready_o);
+        end
     end endgenerate
 `endif
 
