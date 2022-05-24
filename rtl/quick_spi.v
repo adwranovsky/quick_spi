@@ -372,13 +372,28 @@ module quick_spi #(
 
         // Check read handshakes
         always @(posedge clk_i)
-            if (f_read_handshake)
+            if (f_read_handshake) begin
+                // Check data
                 assert(
                     (rddata_mask_o & device_data(rddata_o, f))
                     ==
                     (rddata_mask_o & device_data(f_spi_read_data, f))
                 );
+            end
     end endgenerate
+
+
+    // Check that all ones in the rddata mask are to the right of the zeros
+    integer idx, f_found_zero;
+    always @(posedge clk_i) begin
+        f_found_zero = 0;
+        for (idx = 0; idx < MAX_DATA_LENGTH; idx = idx + 1) begin
+            if (rddata_mask_o[idx] == 0)
+                f_found_zero = 1;
+            if (f_found_zero == 1)
+                assert(rddata_mask_o[idx] == 0);
+        end
+    end
 
     // Check each data bit clocked out on sdata_o against the last write handshake
     reg [MAX_DATA_LENGTH*NUM_DEVICES-1:0] f_last_wrdata = 0;
@@ -392,6 +407,11 @@ module quick_spi #(
             f_num_sclks <= f_num_sclks + 1;
         end
     end
+
+    // Extra properties to ensure state stays consistent during inductive proof
+    // TODO: inductive proof currently doesn't pass
+    //always @(*) begin
+    //end
 
     // Cover properties to demonstrate how the device is used
     generate if (COVER==1 && NUM_DEVICES==1 && MAX_DATA_LENGTH==5) begin
