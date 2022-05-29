@@ -21,18 +21,20 @@ depth 200
 smtbmc
 
 [script]
+cover:
+read -formal cover.vh
+--
+
 read -formal shift_register_piso.v
 read -formal shift_register_sipo.v
 read -formal clkdiv.v
 read -formal timer.v
 read -formal quick_spi.v
 chparam -set MAX_DATA_LENGTH 5 quick_spi
-
-cover:
-chparam -set COVER 1 quick_spi
---
-
 prep -top quick_spi
+
+[file cover.vh]
+`define COVER
 
 [files]
 {{files}}
