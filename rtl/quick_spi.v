@@ -72,7 +72,7 @@ module quick_spi #(
     parameter SDATA_HOLD_TIME = 1.0 / SCLK_FREQ_HZ / 4.0,
     parameter QUIET_TIME = 1.0 / SCLK_FREQ_HZ * 2.0,
 
-    localparam NUM_DATA_WIDTH = $clog2(MAX_DATA_LENGTH)
+    localparam NUM_DATA_WIDTH = $clog2(MAX_DATA_LENGTH+1)
 ) (
     input wire clk_i,
     input wire rst_i,
